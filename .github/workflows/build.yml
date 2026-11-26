@@ -1,0 +1,886 @@
+name: Build APK
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+jobs:
+  build-android:
+    runs-on: ubuntu-latest
+    container:
+      image: barichello/godot-ci:4.3
+    steps:
+      - name: Criar arquivos do jogo
+        run: |
+          mkdir -p game/scenes game/scripts
+
+          cat > game/project.godot <<'EOF'
+          config_version=5
+
+          [application]
+          config/name="Football Elite 27"
+          run/main_scene="res://scenes/main.tscn"
+          config/features=PackedStringArray("4.3", "GL Compatibility")
+
+          [display]
+          window/size/viewport_width=1280
+          window/size/viewport_height=720
+          window/stretch/mode="canvas_items"
+          window/stretch/aspect="expand"
+          window/handheld/orientation=4
+
+          [rendering]
+          renderer/rendering_method="gl_compatibility"
+          renderer/rendering_method.mobile="gl_compatibility"
+          textures/vram_compression/import_etc2_astc=true
+          EOF
+
+          cat > game/export_presets.cfg <<'EOF'
+          [preset.0]
+
+          name="Android"
+          platform="Android"
+          runnable=true
+          advanced_options=false
+          dedicated_server=false
+          custom_features=""
+          export_filter="all_resources"
+          include_filter=""
+          exclude_filter=""
+          export_path=""
+          encryption_include_filters=""
+          encryption_exclude_filters=""
+          encrypt_pck=false
+          encrypt_directory=false
+
+          [preset.0.options]
+
+          custom_template/debug=""
+          custom_template/release=""
+          gradle_build/use_gradle_build=false
+          architectures/armeabi-v7a=false
+          architectures/arm64-v8a=true
+          architectures/x86=false
+          architectures/x86_64=false
+          version/code=1
+          version/name="1.0"
+          package/unique_name="com.footballelite.game"
+          package/name="Football Elite 27"
+          package/signed=true
+          screen/immersive_mode=true
+          permissions/internet=true
+          EOF
+
+          cat > game/scenes/main.tscn <<'EOF'
+          [gd_scene load_steps=2 format=3]
+
+          [ext_resource type="Script" path="res://scripts/main.gd" id="1"]
+
+          [node name="Main" type="Node3D"]
+          script = ExtResource("1")
+          EOF
+
+          cat > game/scripts/hud.gd <<'EOF'
+          extends Control
+
+          signal shoot_released(power: float)
+          signal pass_pressed
+          signal dribble_pressed
+          signal switch_pressed
+          signal screen_tapped
+
+          var move := Vector2.ZERO
+          var sprint := false
+          var score_a := 0
+          var score_b := 0
+          var time_text := "3:00"
+          var banner := ""
+          var stick_id := -1
+          var stick_pos := Vector2.ZERO
+          var touches := {}
+          var shoot_id := -1
+          var shoot_hold := 0.0
+          var font: Font
+
+          const RADIUS := {"Chute": 62.0, "Passe": 56.0, "Drible": 52.0, "Correr": 70.0, "Trocar": 48.0}
+          const STICK_R := 110.0
+
+          func _ready() -> void:
+              mouse_filter = Control.MOUSE_FILTER_IGNORE
+              font = ThemeDB.fallback_font
+
+          func _stick_center() -> Vector2:
+              return Vector2(190.0, size.y - 170.0)
+
+          func _btn_center(n: String) -> Vector2:
+              var s := size
+              match n:
+                  "Chute":
+                      return Vector2(s.x - 100.0, s.y - 260.0)
+                  "Passe":
+                      return Vector2(s.x - 235.0, s.y - 190.0)
+                  "Drible":
+                      return Vector2(s.x - 250.0, s.y - 60.0)
+                  "Correr":
+                      return Vector2(s.x - 100.0, s.y - 110.0)
+                  _:
+                      return Vector2(s.x - 370.0, s.y - 170.0)
+
+          func _hit_button(pos: Vector2) -> String:
+              for n in RADIUS.keys():
+                  if pos.distance_to(_btn_center(n)) <= RADIUS[n] + 10.0:
+                      return n
+              return ""
+
+          func _update_stick(pos: Vector2) -> void:
+              var v := (pos - _stick_center()) / STICK_R
+              v = v.limit_length(1.0)
+              stick_pos = _stick_center() + v * STICK_R
+              move = Vector2.ZERO if v.length() < 0.15 else v
+
+          func _input(event: InputEvent) -> void:
+              if event is InputEventScreenTouch:
+                  var pos: Vector2 = event.position
+                  if event.pressed:
+                      screen_tapped.emit()
+                      var hit := _hit_button(pos)
+                      if hit != "":
+                          touches[event.index] = hit
+                          _press(hit, event.index)
+                      elif stick_id == -1 and pos.x < size.x * 0.45:
+                          stick_id = event.index
+                          _update_stick(pos)
+                  else:
+                      if event.index == stick_id:
+                          stick_id = -1
+                          move = Vector2.ZERO
+                          stick_pos = _stick_center()
+                      elif touches.has(event.index):
+                          _release(touches[event.index])
+                          touches.erase(event.index)
+              elif event is InputEventScreenDrag:
+                  if event.index == stick_id:
+                      _update_stick(event.position)
+
+          func _press(n: String, idx: int) -> void:
+              match n:
+                  "Chute":
+                      shoot_id = idx
+                      shoot_hold = 0.0
+                  "Passe":
+                      pass_pressed.emit()
+                  "Drible":
+                      dribble_pressed.emit()
+                  "Correr":
+                      sprint = true
+                  "Trocar":
+                      switch_pressed.emit()
+
+          func _release(n: String) -> void:
+              match n:
+                  "Chute":
+                      shoot_released.emit(clampf(shoot_hold / 0.7, 0.25, 1.0))
+                      shoot_id = -1
+                      shoot_hold = 0.0
+                  "Correr":
+                      sprint = false
+
+          func _process(delta: float) -> void:
+              if shoot_id != -1:
+                  shoot_hold += delta
+              if stick_id == -1:
+                  stick_pos = _stick_center()
+              queue_redraw()
+
+          func _text(t: String, y: float, fs: int, col: Color) -> void:
+              draw_string(font, Vector2(0, y), t, HORIZONTAL_ALIGNMENT_CENTER, size.x, fs, col)
+
+          func _draw() -> void:
+              if font == null:
+                  return
+              var bx := size.x / 2.0 - 190.0
+              draw_rect(Rect2(bx, 10, 380, 52), Color(0, 0, 0, 0.6))
+              draw_string(font, Vector2(bx, 46), "AZU  %d - %d  VER   %s" % [score_a, score_b, time_text], HORIZONTAL_ALIGNMENT_CENTER, 380.0, 28, Color.WHITE)
+              draw_circle(_stick_center(), STICK_R, Color(0, 0, 0, 0.35))
+              draw_arc(_stick_center(), STICK_R, 0, TAU, 48, Color(1, 1, 1, 0.6), 3.0)
+              draw_circle(stick_pos, 46.0, Color(1, 1, 1, 0.45))
+              for n in RADIUS.keys():
+                  var c := _btn_center(n)
+                  var r: float = RADIUS[n]
+                  draw_circle(c, r, Color(0.1, 0.1, 0.1, 0.6))
+                  draw_arc(c, r, 0, TAU, 48, Color(1, 1, 1, 0.75), 3.0)
+                  draw_string(font, Vector2(c.x - r, c.y + 8.0), n, HORIZONTAL_ALIGNMENT_CENTER, r * 2.0, 22, Color.WHITE)
+              if shoot_id != -1:
+                  var cc := _btn_center("Chute")
+                  var p := clampf(shoot_hold / 0.7, 0.0, 1.0)
+                  draw_rect(Rect2(cc.x - 60, cc.y - 90, 120, 10), Color(0, 0, 0, 0.6))
+                  draw_rect(Rect2(cc.x - 60, cc.y - 90, 120 * p, 10), Color(1, 0.8, 0.1))
+              if banner != "":
+                  var lines := banner.split("\n")
+                  var y := size.y * 0.4
+                  for l in lines:
+                      _text(l, y, 48, Color(1, 1, 0.3))
+                      y += 60.0
+          EOF
+
+          cat > game/scripts/main.gd <<'EOF'
+          extends Node3D
+
+          const L := 100.0
+          const W := 60.0
+          const GOAL_W := 14.0
+          const GOAL_H := 4.5
+          const BALL_R := 0.7
+          const MATCH_TIME := 180.0
+          const GRAVITY := 28.0
+
+          var cam: Camera3D
+          var hud
+          var ball: MeshInstance3D
+          var ring: MeshInstance3D
+          var ball_pos := Vector3(0, BALL_R, 0)
+          var ball_vel := Vector3.ZERO
+          var players: Array = []
+          var chaser := [-1, -1]
+          var controlled := 4
+          var score := [0, 0]
+          var time_left := MATCH_TIME
+          var state := "kickoff"
+          var state_timer := 1.2
+          var banner := ""
+          var owner_team := -1
+          var owner_idx := -1
+          var owner_cd := 0.0
+          var auto_cd := 0.0
+          var cam_zoom := 52.0
+          var rng := RandomNumberGenerator.new()
+
+          func mat(c: Color, emissive := false) -> StandardMaterial3D:
+              var m := StandardMaterial3D.new()
+              m.albedo_color = c
+              m.roughness = 0.9
+              if c.a < 1.0:
+                  m.transparency = BaseMaterial3D.TRANSPARENCY_ALPHA
+              if emissive:
+                  m.emission_enabled = true
+                  m.emission = c
+              return m
+
+          func box(parent: Node, sz: Vector3, pos: Vector3, c: Color) -> MeshInstance3D:
+              var mi := MeshInstance3D.new()
+              var bm := BoxMesh.new()
+              bm.size = sz
+              mi.mesh = bm
+              mi.material_override = mat(c)
+              mi.position = pos
+              parent.add_child(mi)
+              return mi
+
+          func _line(a: Vector2, b: Vector2) -> void:
+              var d := b - a
+              var mi := box(self, Vector3(d.length() + 0.3, 0.04, 0.3), Vector3((a.x + b.x) / 2.0, 0.06, (a.y + b.y) / 2.0), Color.WHITE)
+              mi.rotation.y = -atan2(d.y, d.x)
+
+          func _rx(n: Node3D, v: float) -> void:
+              n.rotation.x = v
+
+          func _nudge(p, v: Vector3) -> void:
+              var pos: Vector3 = p.node.position
+              pos += v
+              p.node.position = pos
+
+          func _ready() -> void:
+              rng.randomize()
+              _build_env()
+              _build_field()
+              _build_goals()
+              _build_stands()
+              _build_ball()
+              _build_players()
+              _build_camera()
+              _build_hud()
+              _reset_kickoff()
+
+          func _build_env() -> void:
+              var sun := DirectionalLight3D.new()
+              sun.rotation_degrees = Vector3(-75, 20, 0)
+              sun.shadow_enabled = true
+              sun.light_energy = 1.1
+              add_child(sun)
+              var env := Environment.new()
+              env.background_mode = Environment.BG_COLOR
+              env.background_color = Color(0.04, 0.07, 0.15)
+              env.ambient_light_source = Environment.AMBIENT_SOURCE_COLOR
+              env.ambient_light_color = Color(0.75, 0.78, 0.9)
+              env.ambient_light_energy = 0.6
+              var we := WorldEnvironment.new()
+              we.environment = env
+              add_child(we)
+
+          func _build_field() -> void:
+              box(self, Vector3(L + 30.0, 0.2, W + 30.0), Vector3(0, -0.1, 0), Color(0.12, 0.45, 0.15))
+              var n := 10
+              for i in n:
+                  var c := Color(0.16, 0.55, 0.19) if i % 2 == 0 else Color(0.13, 0.48, 0.16)
+                  box(self, Vector3(L / n, 0.04, W), Vector3(-L / 2.0 + L / n * (i + 0.5), 0.02, 0), c)
+              var h := L / 2.0
+              var w := W / 2.0
+              _line(Vector2(-h, -w), Vector2(h, -w))
+              _line(Vector2(-h, w), Vector2(h, w))
+              _line(Vector2(-h, -w), Vector2(-h, w))
+              _line(Vector2(h, -w), Vector2(h, w))
+              _line(Vector2(0, -w), Vector2(0, w))
+              var seg := 32
+              for i in seg:
+                  var a0 := TAU * i / seg
+                  var a1 := TAU * (i + 1) / seg
+                  _line(Vector2(cos(a0), sin(a0)) * 8.0, Vector2(cos(a1), sin(a1)) * 8.0)
+              for s in [-1.0, 1.0]:
+                  for dim in [[16.0, 18.0], [6.0, 9.0]]:
+                      var dd: float = dim[0]
+                      var hw: float = dim[1]
+                      _line(Vector2(s * h, -hw), Vector2(s * (h - dd), -hw))
+                      _line(Vector2(s * (h - dd), -hw), Vector2(s * (h - dd), hw))
+                      _line(Vector2(s * (h - dd), hw), Vector2(s * h, hw))
+
+          func _build_goals() -> void:
+              for s in [-1.0, 1.0]:
+                  var x: float = s * L / 2.0
+                  var post := Color(0.95, 0.95, 0.95)
+                  box(self, Vector3(0.4, GOAL_H, 0.4), Vector3(x, GOAL_H / 2.0, -GOAL_W / 2.0), post)
+                  box(self, Vector3(0.4, GOAL_H, 0.4), Vector3(x, GOAL_H / 2.0, GOAL_W / 2.0), post)
+                  box(self, Vector3(0.4, 0.4, GOAL_W + 0.4), Vector3(x, GOAL_H, 0), post)
+                  var net := Color(1, 1, 1, 0.22)
+                  box(self, Vector3(0.1, GOAL_H, GOAL_W), Vector3(x + s * 4.0, GOAL_H / 2.0, 0), net)
+                  box(self, Vector3(4.0, 0.1, GOAL_W), Vector3(x + s * 2.0, GOAL_H, 0), net)
+                  for z in [-1.0, 1.0]:
+                      box(self, Vector3(4.0, GOAL_H, 0.1), Vector3(x + s * 2.0, GOAL_H / 2.0, z * GOAL_W / 2.0), net)
+
+          func _build_stands() -> void:
+              var mm := MultiMesh.new()
+              mm.transform_format = MultiMesh.TRANSFORM_3D
+              mm.use_colors = true
+              var bm := BoxMesh.new()
+              bm.size = Vector3(1.0, 1.6, 1.0)
+              var m := StandardMaterial3D.new()
+              m.vertex_color_use_as_albedo = true
+              bm.material = m
+              mm.mesh = bm
+              var cols := 66
+              var rows := 5
+              mm.instance_count = cols * rows * 2
+              var k := 0
+              for sd in [-1.0, 1.0]:
+                  for r in rows:
+                      box(self, Vector3(L + 24.0, 1.0 + r * 1.3, 1.7), Vector3(0, (1.0 + r * 1.3) / 2.0, sd * (W / 2.0 + 6.0 + r * 1.7)), Color(0.1, 0.15, 0.35))
+                      for c in cols:
+                          var px := -L / 2.0 - 10.0 + c * 1.6
+                          var pz: float = sd * (W / 2.0 + 6.0 + r * 1.7)
+                          mm.set_instance_transform(k, Transform3D(Basis(), Vector3(px, 1.0 + r * 1.3 + 1.0, pz)))
+                          mm.set_instance_color(k, Color.from_hsv(rng.randf(), 0.6, rng.randf_range(0.5, 1.0)))
+                          k += 1
+              var mmi := MultiMeshInstance3D.new()
+              mmi.multimesh = mm
+              add_child(mmi)
+
+          func _build_ball() -> void:
+              ball = MeshInstance3D.new()
+              var sm := SphereMesh.new()
+              sm.radius = BALL_R
+              sm.height = BALL_R * 2.0
+              ball.mesh = sm
+              ball.material_override = mat(Color.WHITE)
+              add_child(ball)
+
+          func _make_model(shirt: Color, shorts: Color, skin: Color) -> Dictionary:
+              var root := Node3D.new()
+              var legs := []
+              var arms := []
+              for sx in [-0.4, 0.4]:
+                  var leg := Node3D.new()
+                  leg.position = Vector3(sx, 1.0, 0)
+                  root.add_child(leg)
+                  box(leg, Vector3(0.6, 1.0, 0.6), Vector3(0, -0.5, 0), shorts)
+                  box(leg, Vector3(0.7, 0.3, 0.9), Vector3(0, -0.95, 0.1), Color(0.05, 0.05, 0.05))
+                  legs.append(leg)
+              box(root, Vector3(1.5, 1.3, 0.8), Vector3(0, 1.65, 0), shirt)
+              box(root, Vector3(1.0, 1.0, 1.0), Vector3(0, 2.8, 0), skin)
+              box(root, Vector3(1.05, 0.3, 1.05), Vector3(0, 3.35, 0), Color(0.15, 0.1, 0.05))
+              for sx in [-1.0, 1.0]:
+                  var arm := Node3D.new()
+                  arm.position = Vector3(sx, 2.25, 0)
+                  root.add_child(arm)
+                  box(arm, Vector3(0.4, 1.1, 0.4), Vector3(0, -0.55, 0), shirt)
+                  box(arm, Vector3(0.4, 0.3, 0.4), Vector3(0, -1.2, 0), skin)
+                  arms.append(arm)
+              return {"root": root, "legs": legs, "arms": arms}
+
+                        func _build_players() -> void:
+              var forms := [Vector2(-46, 0), Vector2(-30, -13), Vector2(-30, 13), Vector2(-17, 0), Vector2(-8, 0)]
+              for t in 2:
+                  for i in 5:
+                      var shirt := Color(0.1, 0.35, 0.95) if t == 0 else Color(0.9, 0.12, 0.15)
+                      if i == 0:
+                          shirt = Color(0.95, 0.85, 0.1) if t == 0 else Color(0.1, 0.8, 0.3)
+                      var shorts := Color.WHITE if t == 0 else Color(0.1, 0.1, 0.3)
+                      var m := _make_model(shirt, shorts, Color(0.95, 0.75, 0.6))
+                      add_child(m.root)
+                      var hp: Vector2 = forms[i]
+                      var sg := 1.0 if t == 0 else -1.0
+                      players.append({
+                          "node": m.root, "legs": m.legs, "arms": m.arms,
+                          "team": t, "idx": i, "gid": t * 5 + i,
+                          "home": Vector3(hp.x * sg, 0, hp.y * sg),
+                          "vel": Vector3.ZERO, "face": Vector3(sg, 0, 0),
+                          "phase": 0.0, "kick_cd": 0.0, "kick_anim": 0.0,
+                          "boost": 0.0, "boost_cd": 0.0, "think": 0.0})
+              ring = MeshInstance3D.new()
+              var tm := TorusMesh.new()
+              tm.inner_radius = 1.5
+              tm.outer_radius = 1.9
+              ring.mesh = tm
+              ring.material_override = mat(Color(1, 0.9, 0.2), true)
+              add_child(ring)
+
+          func _build_camera() -> void:
+              cam = Camera3D.new()
+              cam.fov = 50.0
+              cam.rotation_degrees = Vector3(-90, 0, 0)
+              cam.position = Vector3(0, cam_zoom, 0)
+              add_child(cam)
+              cam.current = true
+
+          func _build_hud() -> void:
+              var layer := CanvasLayer.new()
+              add_child(layer)
+              hud = Control.new()
+              hud.set_script(load("res://scripts/hud.gd"))
+              layer.add_child(hud)
+              hud.set_anchors_preset(Control.PRESET_FULL_RECT)
+              hud.shoot_released.connect(_on_shoot)
+              hud.pass_pressed.connect(_on_pass)
+              hud.dribble_pressed.connect(_on_dribble)
+              hud.switch_pressed.connect(_switch_nearest)
+              hud.screen_tapped.connect(_on_tapped)
+
+          func _reset_kickoff() -> void:
+              ball_pos = Vector3(0, BALL_R, 0)
+              ball_vel = Vector3.ZERO
+              owner_idx = -1
+              owner_team = -1
+              for p in players:
+                  p.node.position = p.home
+                  p.vel = Vector3.ZERO
+                  p.kick_cd = 0.0
+              controlled = 4
+              state = "kickoff"
+              state_timer = 1.2
+              banner = ""
+
+          func _goal(team0_scored: bool) -> void:
+              score[0 if team0_scored else 1] += 1
+              state = "goal"
+              state_timer = 2.5
+              banner = "GOOOL!"
+
+          func _set_end_banner() -> void:
+              var r := "EMPATE"
+              if score[0] > score[1]:
+                  r = "VOCE VENCEU!"
+              elif score[1] > score[0]:
+                  r = "VOCE PERDEU"
+              banner = "FIM DE JOGO\n" + r + "\nToque para reiniciar"
+
+          func _on_tapped() -> void:
+              if state == "end":
+                  score = [0, 0]
+                  time_left = MATCH_TIME
+                  _reset_kickoff()
+
+          func _physics_process(delta: float) -> void:
+              match state:
+                  "kickoff":
+                      state_timer -= delta
+                      if state_timer <= 0.0:
+                          state = "play"
+                          banner = ""
+                  "play":
+                      time_left -= delta
+                      if time_left <= 0.0:
+                          time_left = 0.0
+                          state = "end"
+                          _set_end_banner()
+                  "goal":
+                      state_timer -= delta
+                      if state_timer <= 0.0:
+                          _reset_kickoff()
+              if state == "play":
+                  _ball_interaction(delta)
+              if state == "play" or state == "goal":
+                  _ball_physics(delta)
+              _compute_chasers()
+              _update_players(delta)
+              ball.position = ball_pos
+              hud.score_a = score[0]
+              hud.score_b = score[1]
+              hud.banner = banner
+              hud.time_text = "%d:%02d" % [floori(time_left / 60.0), int(time_left) % 60]
+
+          func _process(delta: float) -> void:
+              var tx := clampf(ball_pos.x * 0.85, -14.0, 14.0)
+              cam.position.x = lerpf(cam.position.x, tx, 4.0 * delta)
+              cam.position.z = lerpf(cam.position.z, ball_pos.z * 0.25, 4.0 * delta)
+              cam.position.y = lerpf(cam.position.y, cam_zoom, 3.0 * delta)
+              var cp: Vector3 = players[controlled].node.position
+              ring.position = Vector3(cp.x, 0.12, cp.z)
+
+          func _ball_physics(delta: float) -> void:
+              ball_vel.y -= GRAVITY * delta
+              ball_pos += ball_vel * delta
+              if ball_pos.y < BALL_R:
+                  ball_pos.y = BALL_R
+                  if ball_vel.y < -2.0:
+                      ball_vel.y = -ball_vel.y * 0.55
+                  else:
+                      ball_vel.y = 0.0
+                  var h := Vector2(ball_vel.x, ball_vel.z).move_toward(Vector2.ZERO, 7.0 * delta)
+                  h *= (1.0 - 0.35 * delta)
+                  ball_vel.x = h.x
+                  ball_vel.z = h.y
+              else:
+                  ball_vel.x *= (1.0 - 0.1 * delta)
+                  ball_vel.z *= (1.0 - 0.1 * delta)
+              var hw := W / 2.0 + 1.5
+              if absf(ball_pos.z) > hw:
+                  ball_pos.z = signf(ball_pos.z) * hw
+                  ball_vel.z *= -0.6
+              var in_mouth := absf(ball_pos.z) < GOAL_W / 2.0 and ball_pos.y < GOAL_H
+              if absf(ball_pos.x) > L / 2.0:
+                  if in_mouth:
+                      if state == "play":
+                          _goal(ball_pos.x > 0.0)
+                      if absf(ball_pos.x) > L / 2.0 + 3.6:
+                          ball_pos.x = signf(ball_pos.x) * (L / 2.0 + 3.6)
+                          ball_vel.x *= -0.2
+                  elif absf(ball_pos.x) > L / 2.0 + 1.5:
+                      ball_pos.x = signf(ball_pos.x) * (L / 2.0 + 1.5)
+                      ball_vel.x *= -0.5
+
+          func _dist_ball(p) -> float:
+              var pp: Vector3 = p.node.position
+              return Vector2(pp.x - ball_pos.x, pp.z - ball_pos.z).length()
+
+          func _ball_interaction(delta: float) -> void:
+              owner_cd = maxf(0.0, owner_cd - delta)
+              if owner_idx >= 0 and _dist_ball(players[owner_idx]) > 6.0:
+                  owner_idx = -1
+                  owner_team = -1
+              if ball_pos.y > 2.4:
+                  return
+              var best := -1
+              var best_d := 1.8
+              for i in players.size():
+                  var p = players[i]
+                  if p.idx == 0 or p.kick_cd > 0.0:
+                      continue
+                  var d := _dist_ball(p)
+                  if d < best_d:
+                      best_d = d
+                      best = i
+              if best < 0:
+                  return
+              if owner_idx != best and owner_cd > 0.0:
+                  return
+              var q = players[best]
+              if owner_idx != best:
+                  owner_cd = 0.2
+              owner_idx = best
+              owner_team = q.team
+              var spd: float = Vector2(q.vel.x, q.vel.z).length()
+              if spd < 1.0:
+                  ball_vel.x *= 0.5
+                  ball_vel.z *= 0.5
+                  q.kick_cd = 0.1
+              else:
+                  var f: Vector3 = q.vel.normalized()
+                  ball_vel.x = f.x * (spd * 1.25 + 2.0)
+                  ball_vel.z = f.z * (spd * 1.25 + 2.0)
+                  q.kick_cd = 0.3
+                  q.kick_anim = 0.12
+
+          func _kick(p: Dictionary, dir: Vector3, power: float, lift: float) -> void:
+              dir.y = 0.0
+              dir = dir.normalized()
+              ball_vel = dir * power
+              ball_vel.y = lift
+              p.kick_cd = 0.5
+              p.kick_anim = 0.25
+              owner_idx = p.gid
+              owner_team = p.team
+              owner_cd = 0.15
+
+          func _on_shoot(power01: float) -> void:
+              if state != "play":
+                  return
+              var p: Dictionary = players[controlled]
+              if _dist_ball(p) > 2.6:
+                  return
+              var dir: Vector3 = p.face
+              var mv: Vector2 = hud.move
+              if mv.length() > 0.3:
+                  dir = Vector3(mv.x, 0, mv.y).normalized()
+              var pp: Vector3 = p.node.position
+              var tg := Vector3(L / 2.0, 0, 0) - pp
+              tg.y = 0.0
+              tg = tg.normalized()
+              if dir.dot(tg) > 0.8:
+                  dir = dir.lerp(tg, 0.5).normalized()
+              _kick(p, dir, 14.0 + 22.0 * power01, 2.0 + 4.0 * power01)
+
+          func _on_pass() -> void:
+              if state != "play":
+                  return
+              var p: Dictionary = players[controlled]
+              if _dist_ball(p) > 2.6:
+                  return
+              var dir: Vector3 = p.face
+              var mv: Vector2 = hud.move
+              if mv.length() > 0.3:
+                  dir = Vector3(mv.x, 0, mv.y).normalized()
+              _do_pass(p, dir)
+
+          func _on_dribble() -> void:
+              var p: Dictionary = players[controlled]
+              if p.boost_cd <= 0.0:
+                  p.boost = 0.35
+                  p.boost_cd = 1.0
+
+          func _find_pass(p: Dictionary, dir: Vector3) -> int:
+              var best := -1
+              var best_s := 0.3
+              for i in range(1, 5):
+                  var gid: int = p.team * 5 + i
+                  if gid == p.gid:
+                      continue
+                  var q = players[gid]
+                  var d: Vector3 = q.node.position - p.node.position
+                  d.y = 0.0
+                  var dist := d.length()
+                  if dist < 3.0 or dist > 45.0:
+                      continue
+                  var s: float = d.normalized().dot(dir) - dist * 0.008
+                  if s > best_s:
+                      best_s = s
+                      best = gid
+              return best
+
+          func _do_pass(p: Dictionary, dir: Vector3) -> void:
+              var gid := _find_pass(p, dir)
+              if gid >= 0:
+                  var q = players[gid]
+                  var target: Vector3 = q.node.position + q.vel * 0.6
+                  var d: Vector3 = target - p.node.position
+                  d.y = 0.0
+                  _kick(p, d, clampf(sqrt(70.0 + 14.0 * d.length()) * 1.1, 10.0, 34.0), 0.0)
+                  if p.team == 0:
+                      controlled = gid
+              else:
+                  _kick(p, dir, 16.0, 0.0)
+
+          func _switch_nearest() -> void:
+              var best := controlled
+              var bd := 1e9
+              for i in range(1, 5):
+                  if i == controlled:
+                      continue
+                  var d := _dist_ball(players[i])
+                  if d < bd:
+                      bd = d
+                      best = i
+              controlled = best
+
+          func _compute_chasers() -> void:
+              chaser = [-1, -1]
+              for t in 2:
+                  var bd := 1e9
+                  for i in range(1, 5):
+                      if t == 0 and i == controlled:
+                          continue
+                      var p = players[t * 5 + i]
+                      var d := _dist_ball(p)
+                      if d < bd:
+                          bd = d
+                          chaser[t] = t * 5 + i
+
+          func _seek(pos: Vector3, target: Vector3, spd: float) -> Vector3:
+              var d := target - pos
+              d.y = 0.0
+              if d.length() < 0.5:
+                  return Vector3.ZERO
+              return d.normalized() * minf(spd, d.length() * 4.0)
+
+          func _nearest_opp(p: Dictionary) -> Dictionary:
+              var bd := 1e9
+              var bp := Vector3.ZERO
+              var pp: Vector3 = p.node.position
+              for q in players:
+                  if q.team == p.team:
+                      continue
+                  var qp: Vector3 = q.node.position
+                  var d := pp.distance_to(qp)
+                  if d < bd:
+                      bd = d
+                      bp = qp
+              return {"d": bd, "pos": bp}
+
+          func _ai_with_ball(p: Dictionary, pos: Vector3, att: float) -> Vector3:
+              var goal := Vector3(att * L / 2.0, 0, 0)
+              var to_goal := goal - pos
+              to_goal.y = 0.0
+              var dist := to_goal.length()
+              var opp := _nearest_opp(p)
+              if p.kick_cd <= 0.0:
+                  if dist < 30.0 and absf(pos.z) < 22.0:
+                      var aim := Vector3(goal.x, 0, rng.randf_range(-5.0, 5.0)) - pos
+                      _kick(p, aim, rng.randf_range(24.0, 33.0), rng.randf_range(1.0, 5.0))
+                      return Vector3.ZERO
+                  if opp.d < 4.5 and p.think <= 0.0:
+                      p.think = 0.8
+                      if _find_pass(p, to_goal.normalized()) >= 0:
+                          _do_pass(p, to_goal.normalized())
+                          return Vector3.ZERO
+              var dir := to_goal.normalized()
+              if opp.d < 6.0:
+                  var away: Vector3 = pos - opp.pos
+                  away.y = 0.0
+                  dir = (dir + away.normalized() * 0.8).normalized()
+              return dir * 8.0
+
+          func _ai_move(p: Dictionary) -> Vector3:
+              var pos: Vector3 = p.node.position
+              var t: int = p.team
+              var att: float = 1.0 if t == 0 else -1.0
+              var ballp := Vector3(ball_pos.x, 0.0, ball_pos.z)
+              if p.idx == 0:
+                  var gx: float = -att * (L / 2.0 - 3.0)
+                  var target := Vector3(gx, 0, clampf(ball_pos.z * 0.6, -GOAL_W / 2.0 + 1.0, GOAL_W / 2.0 - 1.0))
+                  if absf(ball_pos.x - gx) < 12.0 and absf(ball_pos.z) < 14.0:
+                      target = ballp
+                  if _dist_ball(p) < 2.3 and p.kick_cd <= 0.0 and ball_pos.y < 3.0:
+                      _kick(p, Vector3(att, 0, rng.randf_range(-0.6, 0.6)), 22.0, 3.0)
+                  return _seek(pos, target, 7.5)
+              if _dist_ball(p) < 2.2:
+                  return _ai_with_ball(p, pos, att)
+              if chaser[t] == p.gid:
+                  return _seek(pos, ballp + Vector3(ball_vel.x, 0, ball_vel.z) * 0.25, 8.5)
+              var shift := Vector3(ball_pos.x * 0.45, 0, ball_pos.z * 0.3)
+              var tg: Vector3 = p.home + shift
+              if owner_team == t:
+                  tg.x += att * 8.0
+              tg.x = clampf(tg.x, -L / 2.0 + 4.0, L / 2.0 - 4.0)
+              tg.z = clampf(tg.z, -W / 2.0 + 3.0, W / 2.0 - 3.0)
+              return _seek(pos, tg, 6.5)
+
+          func _update_players(delta: float) -> void:
+              var frozen := state != "play"
+              auto_cd -= delta
+              if state == "play" and owner_team != 0 and auto_cd <= 0.0 and _dist_ball(players[controlled]) > 9.0:
+                  _switch_nearest()
+                  auto_cd = 0.6
+              for p in players:
+                  p.kick_cd = maxf(0.0, p.kick_cd - delta)
+                  p.kick_anim = maxf(0.0, p.kick_anim - delta)
+                  p.boost = maxf(0.0, p.boost - delta)
+                  p.boost_cd = maxf(0.0, p.boost_cd - delta)
+                  p.think = maxf(0.0, p.think - delta)
+                  var desired := Vector3.ZERO
+                  if not frozen:
+                      if p.team == 0 and p.idx == controlled:
+                          var mv: Vector2 = hud.move
+                          var sp := 8.0
+                          if hud.sprint:
+                              sp = 11.0
+                          if p.boost > 0.0:
+                              sp *= 1.5
+                          desired = Vector3(mv.x, 0, mv.y) * sp
+                      else:
+                          desired = _ai_move(p)
+                  var vel: Vector3 = p.vel
+                  vel = vel.move_toward(desired, 45.0 * delta)
+                  p.vel = vel
+                  var np: Vector3 = p.node.position + vel * delta
+                  np.x = clampf(np.x, -L / 2.0 - 1.0, L / 2.0 + 1.0)
+                  np.z = clampf(np.z, -W / 2.0 - 1.0, W / 2.0 + 1.0)
+                  p.node.position = np
+                  var speed: float = vel.length()
+                  if speed > 0.5:
+                      p.face = vel.normalized()
+                  var fc: Vector3 = p.face
+                  var target_rot := atan2(fc.x, fc.z)
+                  var rot: Vector3 = p.node.rotation
+                  rot.y = lerp_angle(rot.y, target_rot, 12.0 * delta)
+                  p.node.rotation = rot
+                  var ph: float = p.phase
+                  ph += speed * delta * 1.4
+                  p.phase = ph
+                  var sw := sin(ph) * minf(speed / 8.0, 1.0) * 0.9
+                  _rx(p.legs[0], sw)
+                  _rx(p.legs[1], -sw)
+                  _rx(p.arms[0], -sw)
+                  _rx(p.arms[1], sw)
+                  if p.kick_anim > 0.0:
+                      _rx(p.legs[0], -1.3)
+              for i in players.size():
+                  for j in range(i + 1, players.size()):
+                      var a = players[i]
+                      var b = players[j]
+                      var pa: Vector3 = a.node.position
+                      var pb: Vector3 = b.node.position
+                      var d := pa - pb
+                      d.y = 0.0
+                      var l := d.length()
+                      if l < 1.6 and l > 0.001:
+                          var push := d / l * (1.6 - l) * 0.5
+                          _nudge(a, push)
+                          _nudge(b, -push)
+          EOF
+
+      - name: Preparar Godot e Android
+        run: |
+          mkdir -p ~/.local/share/godot/export_templates/
+          mv /root/.local/share/godot/export_templates/${GODOT_VERSION}.stable ~/.local/share/godot/export_templates/${GODOT_VERSION}.stable || true
+          keytool -keyalg RSA -genkeypair -alias androiddebugkey \
+            -keypass android -keystore /root/debug.keystore \
+            -storepass android -dname "CN=Android Debug,O=Android,C=US" \
+            -validity 9999 -deststoretype pkcs12
+          JAVA_BIN=$(readlink -f "$(which java)")
+          JAVA_DIR=$(dirname "$(dirname "$JAVA_BIN")")
+          mkdir -p ~/.config/godot
+          cat > ~/.config/godot/editor_settings-4.tres <<EOT
+          [gd_resource type="EditorSettings" format=3]
+
+          [resource]
+          export/android/android_sdk_path = "/usr/lib/android-sdk"
+          export/android/java_sdk_path = "$JAVA_DIR"
+          export/android/debug_keystore = "/root/debug.keystore"
+          export/android/debug_keystore_user = "androiddebugkey"
+          export/android/debug_keystore_pass = "android"
+          EOT
+          cp ~/.config/godot/editor_settings-4.tres ~/.config/godot/editor_settings-4.3.tres
+
+      - name: Importar recursos
+        working-directory: game
+        run: godot --headless --verbose --import || true
+
+      - name: Compilar APK
+        working-directory: game
+        run: |
+          mkdir -p "$GITHUB_WORKSPACE/build"
+          godot --headless --verbose --export-debug "Android" "$GITHUB_WORKSPACE/build/FootballElite27.apk"
+
+      - name: Publicar APK
+        uses: actions/upload-artifact@v4
+        with:
+          name: FootballElite27-APK
+          path: build/FootballElite27.apk
